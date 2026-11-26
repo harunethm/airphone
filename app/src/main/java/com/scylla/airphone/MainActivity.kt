@@ -9,6 +9,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -46,7 +47,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -54,10 +54,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -75,6 +72,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -114,6 +112,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
     private val askPerms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { startLink() }
 
+    // Discovery: Android 12+ "Nearby devices"; 9-11 can only discover with location permission + Location on.
+    private val scanPerms = arrayOf(
+        if (Build.VERSION.SDK_INT >= 31) Manifest.permission.BLUETOOTH_SCAN else Manifest.permission.ACCESS_FINE_LOCATION,
+    )
+    private val askScan = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted.values.all { it }) scan() else HidLink.say("Searching needs that permission — or pair by the TV's address")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -138,7 +144,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     onGain = { gain = it; motion.gain = it },
                     onGainDone = { prefs.edit().putFloat(PREF_GAIN, gain).apply() },
                     onFix = ::fix,
-                    onPair = ::makeDiscoverable,
+                    onScan = ::scan,
+                    onMakeVisible = ::makeDiscoverable,
+                    onForgetFailed = ::openBluetoothSettings,
                 )
             }
         }
@@ -178,7 +186,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 val denied = perms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
                 val blocked = prefs.getBoolean(PREF_ASKED, false) && denied.none { shouldShowRequestPermissionRationale(it) }
                 if (blocked) {
-                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+                    openAppSettings()
                 } else {
                     requestPerms()
                 }
@@ -186,6 +194,34 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             HidLink.Phase.BT_OFF -> startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             else -> {}
         }
+    }
+
+    private fun scan() {
+        val denied = scanPerms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (denied.isNotEmpty()) {
+            if (prefs.getBoolean(PREF_ASKED_SCAN, false) && denied.none { shouldShowRequestPermissionRationale(it) }) {
+                HidLink.say("Allow Nearby devices / Location for AirPhone in Settings, or pair by the TV's address")
+                openAppSettings()
+            } else {
+                prefs.edit().putBoolean(PREF_ASKED_SCAN, true).apply()
+                askScan.launch(scanPerms)
+            }
+            return
+        }
+        if (Build.VERSION.SDK_INT < 31 && !getSystemService(LocationManager::class.java).isLocationEnabled) {
+            HidLink.say("On Android 11 and older, searching needs Location on — turn it on, then search again")
+            startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+            return
+        }
+        HidLink.startScan()
+    }
+
+    private fun openAppSettings() =
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+
+    private fun openBluetoothSettings() {
+        HidLink.say("Forget it in Bluetooth settings (tap the device → Forget)")
+        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
     }
 
     private fun makeDiscoverable() {
@@ -223,6 +259,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         const val PREF_GAIN = "gain"
         const val PREF_AIR = "air"
         const val PREF_ASKED = "asked_perms"
+        const val PREF_ASKED_SCAN = "asked_scan_perms"
     }
 }
 
@@ -246,16 +283,27 @@ private fun RemoteScreen(
     onGain: (Float) -> Unit,
     onGainDone: () -> Unit,
     onFix: () -> Unit,
-    onPair: () -> Unit,
+    onScan: () -> Unit,
+    onMakeVisible: () -> Unit,
+    onForgetFailed: () -> Unit,
 ) {
+    var devices by rememberSaveable { mutableStateOf(false) }
     var pairing by remember { mutableStateOf(false) }
+    // First run: nothing has ever connected, so go straight to adding a TV.
+    var autoOpened by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(HidLink.phase) {
+        if (HidLink.phase == HidLink.Phase.READY && !autoOpened && !HidLink.hasKnownHost()) {
+            autoOpened = true
+            devices = true
+        }
+    }
     // While the phone keyboard is up there's no room for the remote; keep header, touchpad and text field.
     val typing = WindowInsets.isImeVisible
     BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val compact = maxHeight < 680.dp // small phones: shrink keys so the touchpad keeps usable height
         val keyH = if (compact) 44.dp else 52.dp
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)) {
-            Header(onFix = onFix, onPair = { onPair(); pairing = true })
+            Header(onFix = onFix, onDevices = { devices = true })
             if (!typing) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     val m = Modifier.weight(1f).height(keyH)
@@ -310,11 +358,21 @@ private fun RemoteScreen(
             TypeRow()
         }
     }
+    // Not before permission: a sheet restored after process death could open before start() (HidLink guards
+    // prefs too). Brief STARTING/BT_OFF keep it open so typed input and search results survive.
+    if (devices && HidLink.phase != HidLink.Phase.NEED_PERMISSION) {
+        DevicesSheet(
+            onDismiss = { devices = false },
+            onScan = onScan,
+            onMakeVisible = { devices = false; onMakeVisible(); pairing = true },
+            onForgetFailed = onForgetFailed,
+        )
+    }
     if (pairing) PairDialog { pairing = false }
 }
 
 @Composable
-private fun Header(onFix: () -> Unit, onPair: () -> Unit) {
+private fun Header(onFix: () -> Unit, onDevices: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(
@@ -335,34 +393,10 @@ private fun Header(onFix: () -> Unit, onPair: () -> Unit) {
         when (HidLink.phase) {
             HidLink.Phase.NEED_PERMISSION -> Button(onClick = onFix) { Text("Allow") }
             HidLink.Phase.BT_OFF -> Button(onClick = onFix) { Text("Turn on") }
-            HidLink.Phase.READY, HidLink.Phase.CONNECTED -> DeviceMenu(onPair)
+            HidLink.Phase.READY, HidLink.Phase.CONNECTED -> FilledTonalButton(onClick = onDevices) {
+                Text(if (HidLink.phase == HidLink.Phase.CONNECTED) "Devices" else "Connect")
+            }
             HidLink.Phase.STARTING, HidLink.Phase.UNSUPPORTED -> {}
-        }
-    }
-}
-
-@Composable
-private fun DeviceMenu(onPair: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        FilledTonalButton(onClick = { open = true }) {
-            Text(if (HidLink.phase == HidLink.Phase.CONNECTED) "Devices" else "Connect")
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            val devices = remember(open) { if (open) HidLink.bonded() else emptyList() }
-            for ((name, device) in devices) {
-                DropdownMenuItem(
-                    text = { Text(name) },
-                    leadingIcon = { if (HidLink.isHost(device)) Icon(Icons.Filled.Check, contentDescription = "Connected") },
-                    onClick = { open = false; HidLink.connect(device) },
-                )
-            }
-            if (devices.isEmpty()) DropdownMenuItem(text = { Text("No paired devices yet") }, onClick = {}, enabled = false)
-            HorizontalDivider()
-            DropdownMenuItem(text = { Text("Pair new TV…") }, onClick = { open = false; onPair() })
-            if (HidLink.phase == HidLink.Phase.CONNECTED) {
-                DropdownMenuItem(text = { Text("Disconnect") }, onClick = { open = false; HidLink.disconnect() })
-            }
         }
     }
 }
@@ -371,13 +405,14 @@ private fun DeviceMenu(onPair: () -> Unit) {
 private fun PairDialog(onDismiss: () -> Unit) = AlertDialog(
     onDismissRequest = onDismiss,
     confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-    title = { Text("Pair with your TV") },
+    title = { Text("Pair from the other device") },
     text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
-                "1. Allow the visibility prompt — your phone shows up as “${HidLink.phoneName}” for 2 minutes.\n" +
-                    "2. On the TV: Settings → Remotes & Accessories → Add accessory.\n" +
-                    "3. Pick your phone, then confirm the pairing code on both screens.\n\n" +
+                "For computers, tablets and phones. (TVs don't list phones — use Search or the address instead.)\n\n" +
+                    "1. Allow the visibility prompt — this phone shows up as “${HidLink.phoneName}” for 2 minutes.\n" +
+                    "2. On the other device, open its Bluetooth settings and pick this phone.\n" +
+                    "3. Confirm the pairing code on both screens.\n\n" +
                     "It connects by itself after pairing. Paired these two before? Unpair on both sides first.",
             )
             Text(HidLink.status, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)

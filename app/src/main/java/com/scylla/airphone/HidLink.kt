@@ -2,6 +2,7 @@ package com.scylla.airphone
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHidDevice
 import android.bluetooth.BluetoothHidDeviceAppQosSettings
@@ -16,7 +17,10 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.concurrent.Executor
@@ -29,11 +33,24 @@ import java.util.concurrent.Executor
 object HidLink {
     enum class Phase { NEED_PERMISSION, BT_OFF, UNSUPPORTED, STARTING, READY, CONNECTED }
 
+    /** A paired or nearby device. [known]: it has taken our connection before. */
+    data class Dev(val device: BluetoothDevice, val name: String, val likelyHost: Boolean, val known: Boolean, val rssi: Int = 0)
+
     var phase by mutableStateOf(Phase.STARTING)
         private set
     var status by mutableStateOf("Starting…")
         private set
     var hostName by mutableStateOf<String?>(null)
+        private set
+    var scanning by mutableStateOf(false)
+        private set
+    /** Classic-Bluetooth devices found by [startScan] that aren't paired yet. */
+    val found = mutableStateListOf<Dev>()
+    /** Failed connects/pairings since the last success; the UI shows help once this is > 0. */
+    var failures by mutableIntStateOf(0)
+        private set
+    /** Bumped on every bond change so the paired list recomposes. */
+    var bonds by mutableIntStateOf(0)
         private set
 
     @Volatile private var hid: BluetoothHidDevice? = null
@@ -46,8 +63,17 @@ object HidLink {
     private var registering = false
     private var foreground = false
     private var retriedThisResume = false
-    private var pending: BluetoothDevice? = null // next host, connected once the current one is gone
+    private var wanted: BluetoothDevice? = null // connect once registered (app was paused mid-attempt)
+    // Compose state so the device rows can show progress; only touched on the main thread.
+    private var pending by mutableStateOf<BluetoothDevice?>(null) // next host, connected once the current one is gone
+    private var bondTarget by mutableStateOf<BluetoothDevice?>(null)
+    private var connecting by mutableStateOf<BluetoothDevice?>(null)
+    private val aclUp = mutableSetOf<String>() // addresses with a live Bluetooth link (ACL broadcasts)
+    private var reached = false // the current attempt got a link up: a failure is a refusal, not "off/far"
+    private var connectedAt = 0L
+    private var userDisconnect = false // the next DISCONNECTED was asked for, not a refusal
     private var stateReceiverRegistered = false
+    private var searchLive = false // our discovery has started (see ACTION_DISCOVERY_STARTED)
     private val mouseLock = Any()
     private lateinit var prefs: SharedPreferences
     private val main = Handler(Looper.getMainLooper())
@@ -85,9 +111,19 @@ object HidLink {
             ?: return set(Phase.UNSUPPORTED, "This phone has no Bluetooth")
         adapter = a
         if (!stateReceiverRegistered) {
-            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-            if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(btState, filter, Context.RECEIVER_NOT_EXPORTED)
-            else app.registerReceiver(btState, filter)
+            val filter = IntentFilter().apply {
+                addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            }
+            // EXPORTED: these come from the Bluetooth process (its own uid, not "system"), which NOT_EXPORTED
+            // filters out. Safe: all of these are protected broadcasts that other apps can't send.
+            if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(btEvents, filter, Context.RECEIVER_EXPORTED)
+            else app.registerReceiver(btEvents, filter)
             stateReceiverRegistered = true
         }
         if (!a.isEnabled) return set(Phase.BT_OFF, "Bluetooth is off")
@@ -104,29 +140,122 @@ object HidLink {
         foreground = false
     }
 
-    /** Paired devices as (display name, device). */
-    fun bonded(): List<Pair<String, BluetoothDevice>> =
-        adapter?.bondedDevices.orEmpty().map { (it.name ?: it.address) to it }.sortedBy { it.first.lowercase() }
+    /** Paired devices: the current host, then ones that connected before, then likely hosts. */
+    fun paired(): List<Dev> {
+        val known = knownHosts()
+        return adapter?.bondedDevices.orEmpty()
+            .map { Dev(it, label(it), Pairing.isLikelyHost(it.bluetoothClass?.deviceClass), it.address in known) }
+            .sortedWith(
+                compareByDescending<Dev> { it.device == host }.thenByDescending { it.known }
+                    .thenByDescending { it.likelyHost }.thenBy { it.name.lowercase() },
+            )
+    }
 
     fun isHost(device: BluetoothDevice) = device == host
 
+    fun hasKnownHost() = knownHosts().isNotEmpty()
+
+    fun isConnecting(device: BluetoothDevice) = device == connecting || device == bondTarget || device == pending
+
+    /** A phone-side pairing is in progress (its code dialogs may be up). */
+    val pairing: Boolean get() = bondTarget != null
+
     fun connect(device: BluetoothDevice) {
-        val h = hid ?: return
-        val current = host
+        val h = hid
+        if (h == null || !registered) {
+            wanted = device // the registered callback connects it
+            return
+        }
+        val current = host ?: connecting
         if (current == device) return
-        set(Phase.READY, "Connecting to ${device.name ?: device.address}…")
-        // The HID device role holds one host and disconnect is async: connect the new one once it's gone.
+        stopScan() // inquiry steals radio time from paging
+        set(Phase.READY, "Connecting to ${label(device)}…")
+        // The HID device role holds one host, and connect() during a still-paging attempt silently reuses its
+        // slot (callbacks then name the wrong TV). Disconnect is async: connect the new one once the old is gone.
         if (current != null) {
             pending = device
             h.disconnect(current)
+            main.removeCallbacks(switchNow)
+            main.postDelayed(switchNow, SWITCH_TIMEOUT_MS) // in case the old one's DISCONNECTED never comes
             return
         }
-        if (!h.connect(device)) set(Phase.READY, "Couldn't start connecting — is the TV on?")
+        main.removeCallbacks(switchNow)
+        connecting = device
+        reached = device.address in aclUp
+        main.removeCallbacks(connectTimeout)
+        main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
+        if (!h.connect(device)) {
+            reached = false // nothing was sent, so nobody refused
+            failed(device)
+        }
     }
 
+    /** User-initiated: also stops auto-reconnect until they pick a TV again. */
     fun disconnect() {
         pending = null
+        wanted = null
+        main.removeCallbacks(switchNow)
+        userDisconnect = true
+        if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_AUTO, false).apply()
+        connecting?.let { hid?.disconnect(it) }
+        stopConnecting()
         host?.let { hid?.disconnect(it) }
+        if (host == null) set(if (registered) Phase.READY else Phase.STARTING, "Not connected")
+    }
+
+    /** Pair (phone-initiated) and then connect. Bonded devices just connect. */
+    fun pair(device: BluetoothDevice) {
+        stopScan()
+        if (device.bondState == BluetoothDevice.BOND_BONDED) return connect(device)
+        // One pairing at a time: a second createBond while BONDING fails on Android ≤13 and would drop the first.
+        if (bondTarget != null || device.bondState == BluetoothDevice.BOND_BONDING) return
+        bondTarget = device
+        say("Pairing with ${label(device)}… confirm the code on both screens when it appears")
+        if (!device.createBond()) {
+            bondTarget = null
+            failures++
+            say("Couldn't start pairing with ${label(device)}")
+        }
+    }
+
+    /** [address] from [Pairing.normalizeAddress]. Works with TVs that are on but not discoverable. */
+    fun pairAddress(address: String) {
+        adapter?.getRemoteDevice(address)?.let { pair(it) }
+    }
+
+    /** Removes the pairing on this phone. False if Android refuses (then send the user to Settings). */
+    fun forget(device: BluetoothDevice): Boolean {
+        if (device == host || device == connecting) disconnect()
+        if (wanted == device) wanted = null
+        if (pending == device) pending = null
+        forgetHost(device.address)
+        // ponytail: removeBond is a hidden API; Bluetooth settings is the fallback when it's blocked.
+        return runCatching { device.javaClass.getMethod("removeBond").invoke(device) as Boolean }.getOrDefault(false)
+    }
+
+    /** Caller holds BLUETOOTH_SCAN (31+) or location (28-30, with location on). */
+    fun startScan() {
+        val a = adapter ?: return
+        found.clear()
+        searchLive = false // a FINISHED still in flight from an earlier search isn't ours
+        scanning = try {
+            a.cancelDiscovery()
+            a.startDiscovery()
+        } catch (e: SecurityException) {
+            false
+        }
+        if (!scanning) say("Couldn't start searching")
+    }
+
+    fun stopScan() {
+        if (!scanning) return
+        scanning = false
+        searchLive = false
+        runCatching { adapter?.cancelDiscovery() }
+    }
+
+    fun say(s: String) {
+        status = s
     }
 
     // --- reports (safe from any thread) ---
@@ -167,15 +296,73 @@ object HidLink {
         status = s
     }
 
+    private fun label(d: BluetoothDevice) = d.name ?: d.address
+
     private fun lastDevice(): BluetoothDevice? {
         val addr = prefs.getString(KEY_LAST, null) ?: return null
-        return bonded().firstOrNull { it.second.address == addr }?.second
+        return adapter?.bondedDevices.orEmpty().firstOrNull { it.address == addr }
+    }
+
+    // prefs exist once start() ran; a restored Devices sheet can ask earlier (e.g. permission revoked).
+    private fun knownHosts(): Set<String> =
+        if (::prefs.isInitialized) prefs.getStringSet(KEY_KNOWN, null).orEmpty() else emptySet()
+
+    private fun forgetHost(address: String) {
+        if (!::prefs.isInitialized) return
+        prefs.edit().putStringSet(KEY_KNOWN, knownHosts() - address).apply()
+        if (prefs.getString(KEY_LAST, null) == address) prefs.edit().remove(KEY_LAST).apply()
+    }
+
+    private fun stopConnecting() {
+        main.removeCallbacks(connectTimeout)
+        connecting = null
+    }
+
+    // A TV that's off or asleep leaves the stack paging for up to a minute; give up sooner and say why.
+    private val connectTimeout = Runnable {
+        val d = connecting ?: return@Runnable
+        hid?.disconnect(d)
+        if (pending == null) return@Runnable failed(d)
+        // User switched TVs while d was still paging: move on even if d's DISCONNECTED never comes.
+        main.removeCallbacks(switchNow)
+        main.postDelayed(switchNow, 500)
+    }
+
+    /** Give up on the old host/attempt and connect the parked one (normally DISCONNECTED does this first). */
+    private val switchNow = Runnable {
+        val next = pending ?: return@Runnable
+        pending = null
+        stopConnecting()
+        host = null // its DISCONNECTED never came; don't park behind it again
+        hostName = null
+        connect(next)
+    }
+
+    /** Remember a host only once it kept the connection: Android 15+ hosts accept, then drop at once. */
+    private val markKnown = Runnable {
+        val d = host ?: return@Runnable
+        prefs.edit()
+            .putString(KEY_LAST, d.address)
+            .putStringSet(KEY_KNOWN, knownHosts() + d.address)
+            .putBoolean(KEY_AUTO, true)
+            .apply()
+    }
+
+    private fun failed(d: BluetoothDevice) {
+        stopConnecting()
+        if (wanted == d) wanted = null
+        if (pending == d) pending = null
+        failures++
+        set(if (registered) Phase.READY else Phase.STARTING, Pairing.connectFailure(label(d), reached))
     }
 
     /** Registration and connection are gone (Bluetooth off, service rebind, or unregistered). */
     private fun lost() {
         registered = false
         registering = false
+        // An attempt cut short by losing registration (app backgrounded, Bluetooth off) resumes once registered again.
+        (pending ?: connecting)?.let { wanted = it }
+        stopConnecting()
         host = null
         hostName = null
         pending = null
@@ -200,17 +387,100 @@ object HidLink {
 
     // Android 9-12 unbind the proxy on Bluetooth off without onServiceDisconnected, and a phone that
     // started with Bluetooth off needs a nudge when it comes on (quick settings doesn't pause us).
-    private val btState = object : BroadcastReceiver() {
+    private val btEvents = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
-                BluetoothAdapter.STATE_OFF -> {
-                    lost()
-                    set(Phase.BT_OFF, "Bluetooth is off")
+            when (intent.action) {
+                BluetoothAdapter.ACTION_STATE_CHANGED -> when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                    BluetoothAdapter.STATE_OFF -> {
+                        lost()
+                        aclUp.clear()
+                        scanning = false
+                        searchLive = false
+                        bondTarget = null
+                        found.clear()
+                        set(Phase.BT_OFF, "Bluetooth is off")
+                    }
+                    BluetoothAdapter.STATE_ON -> if (!proxyRequested && foreground) start(context)
                 }
-                BluetoothAdapter.STATE_ON -> if (!proxyRequested && foreground) start(context)
+                // startScan cancels any running discovery first; that one's late FINISHED must not end ours,
+                // so only a FINISHED after our STARTED counts.
+                BluetoothAdapter.ACTION_DISCOVERY_STARTED -> searchLive = scanning
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> if (searchLive) {
+                    searchLive = false
+                    if (scanning && found.isEmpty()) say("No TV found — older TVs can't be found; use its address")
+                    scanning = false
+                }
+                BluetoothDevice.ACTION_FOUND -> onFound(intent)
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> onBond(intent)
+                BluetoothDevice.ACTION_ACL_CONNECTED -> intent.device()?.let {
+                    aclUp += it.address
+                    if (it == connecting) reached = true
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> intent.device()?.let { aclUp -= it.address }
             }
         }
     }
+
+    private fun onFound(intent: Intent) {
+        val d = intent.device() ?: return
+        // HID device role is Classic only; unnamed and LE-only hits are beacons, earbuds' cases, etc.
+        if (d.bondState == BluetoothDevice.BOND_BONDED || d.type == BluetoothDevice.DEVICE_TYPE_LE) return
+        val name = intent.getStringExtra(BluetoothDevice.EXTRA_NAME) ?: d.name ?: return
+        @Suppress("DEPRECATION")
+        val cls = (intent.getParcelableExtra<BluetoothClass>(BluetoothDevice.EXTRA_CLASS) ?: d.bluetoothClass)?.deviceClass
+        val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
+        val dev = Dev(d, name, Pairing.isLikelyHost(cls), known = false, rssi = rssi)
+        val i = found.indexOfFirst { it.device == d }
+        if (i >= 0) found[i] = dev else found += dev
+    }
+
+    private fun onBond(intent: Intent) {
+        val d = intent.device() ?: return
+        val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+        bonds++
+        if (state == BluetoothDevice.BOND_NONE) forgetHost(d.address)
+        // A TV that lost its keys (reset, unpaired there) makes the stack re-pair mid-connect: hold the
+        // timeout while both code prompts are up, else it cancels the pairing under the user.
+        if (d == connecting) when (state) {
+            BluetoothDevice.BOND_BONDING -> {
+                main.removeCallbacks(connectTimeout)
+                say("${label(d)} asks to pair again — confirm the code on both screens (TV: use its remote)")
+            }
+            BluetoothDevice.BOND_BONDED -> {
+                main.removeCallbacks(connectTimeout)
+                main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
+            }
+            BluetoothDevice.BOND_NONE -> {
+                stopConnecting()
+                hid?.disconnect(d)
+                if (wanted == d) wanted = null
+                if (pending == d) pending = null
+                failures++
+                say(Pairing.bondFailure(label(d), intent.getIntExtra(EXTRA_UNBOND_REASON, 0)) + " — add it again below")
+                if (pending != null) {
+                    main.removeCallbacks(switchNow)
+                    main.postDelayed(switchNow, 500) // the user already picked another TV
+                }
+            }
+        }
+        if (d != bondTarget) return
+        when (state) {
+            BluetoothDevice.BOND_BONDED -> {
+                bondTarget = null
+                found.removeAll { it.device == d }
+                connect(d)
+            }
+            BluetoothDevice.BOND_NONE -> {
+                bondTarget = null
+                failures++
+                say(Pairing.bondFailure(label(d), intent.getIntExtra(EXTRA_UNBOND_REASON, 0)))
+            }
+        }
+    }
+
+    private fun Intent.device(): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        else @Suppress("DEPRECATION") getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
 
     private fun register(h: BluetoothHidDevice) {
         if (registered || registering) return
@@ -233,26 +503,67 @@ object HidLink {
             }
             registered = true
             registering = false
-            set(Phase.READY, "Ready — pick your TV")
-            (pluggedDevice ?: lastDevice())?.let { connect(it) }
+            set(Phase.READY, if (knownHosts().isEmpty()) "Ready — add your TV" else "Ready — pick your TV")
+            // Only hosts that took our connection before: the stack's "plugged" device can be a TV that
+            // never accepted us, and auto-failing on it at every launch reads as a broken app.
+            val known = knownHosts()
+            val auto = listOfNotNull(pluggedDevice, lastDevice()).firstOrNull { it.address in known }
+                .takeIf { prefs.getBoolean(KEY_AUTO, true) }
+            val target = wanted ?: auto
+            wanted = null
+            target?.let { connect(it) }
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    stopConnecting()
+                    userDisconnect = false
                     host = device
-                    hostName = device.name ?: device.address
-                    prefs.edit().putString(KEY_LAST, device.address).apply()
+                    val next = pending
+                    if (next != null && next != device) {
+                        // The old attempt won the race with our disconnect: drop it, DISCONNECTED moves on to next.
+                        hid?.disconnect(device)
+                        return
+                    }
+                    pending = null
+                    main.removeCallbacks(switchNow)
+                    failures = 0
+                    connectedAt = SystemClock.elapsedRealtime()
+                    hostName = label(device)
+                    main.removeCallbacks(markKnown)
+                    main.postDelayed(markKnown, Pairing.QUICK_DROP_MS)
                     set(Phase.CONNECTED, "Connected")
                 }
-                BluetoothProfile.STATE_CONNECTING -> set(Phase.READY, "Connecting to ${device.name ?: device.address}…")
-                BluetoothProfile.STATE_DISCONNECTED -> if (host == null || host == device) {
-                    host = null
-                    hostName = null
+                BluetoothProfile.STATE_CONNECTING -> set(Phase.READY, "Connecting to ${label(device)}…")
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    val attempt = device == connecting && device != host // refused, timed out or switched away
+                    if (!attempt && device != host) return // stale or repeated callback: keep the last message
+                    // Android 15+ hosts accept the channels, then close them if they didn't start the first connection.
+                    val droppedAtOnce = device == host && !userDisconnect &&
+                        SystemClock.elapsedRealtime() - connectedAt < Pairing.QUICK_DROP_MS
+                    userDisconnect = false
+                    main.removeCallbacks(markKnown)
+                    if (device == host) {
+                        host = null
+                        hostName = null
+                    }
                     val next = pending
                     pending = null
-                    if (next != null && next != device) connect(next)
-                    else set(if (registered) Phase.READY else Phase.STARTING, "Not connected")
+                    val idle = if (registered) Phase.READY else Phase.STARTING
+                    when {
+                        next != null && next != device -> {
+                            main.removeCallbacks(switchNow)
+                            stopConnecting()
+                            connect(next)
+                        }
+                        attempt -> failed(device)
+                        droppedAtOnce -> {
+                            failures++
+                            set(idle, "${label(device)} closed the connection right away — see Can't connect?")
+                        }
+                        else -> set(idle, "Not connected")
+                    }
                 }
             }
         }
@@ -271,4 +582,9 @@ object HidLink {
     }
 
     private const val KEY_LAST = "last_host"
+    private const val KEY_KNOWN = "known_hosts" // addresses that have taken our HID connection
+    private const val KEY_AUTO = "auto_reconnect" // off after a manual disconnect
+    private const val CONNECT_TIMEOUT_MS = 15_000L
+    private const val SWITCH_TIMEOUT_MS = 5_000L
+    private const val EXTRA_UNBOND_REASON = "android.bluetooth.device.extra.REASON" // hidden; absent → 0
 }

@@ -26,14 +26,27 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ## Pair (once)
-1. Open AirPhone → allow Bluetooth permission.
-2. **Connect → Pair new TV…** → allow "make visible" (2 min).
-3. On the TV: **Settings → Remotes & Accessories → Add accessory** → pick your phone → confirm the code on both.
-4. It connects by itself. Next time it reconnects to the last TV when the app opens.
+Android TV's own "Add accessory" screen never lists a phone (it only shows keyboards, mice, remotes and
+speakers), so pairing starts on the phone. Have the TV remote at hand to confirm the code.
 
-If the phone was paired with the TV before, unpair it on both sides first.
+1. Open AirPhone → allow Bluetooth permission. The **Devices** sheet opens.
+2. Add the TV, either way:
+   - **TV's Bluetooth address** (pairs with every Android TV, and the only way on Android TV 9–11 such as the
+     Mi TV Stick): on the TV open **Settings → Device Preferences → About → Status → Bluetooth address**, type it
+     in, tap **Pair**.
+   - **Search nearby** (Android TV 12+): open **Settings → Remotes & Accessories → Add accessory** on the TV so it
+     becomes visible, then pick it in the list.
+3. Confirm the same code on the phone and on the TV. It connects by itself; next time it reconnects to the last TV
+   when the app opens.
+
+Computers and tablets can also pair from their side: **Devices → Computer or tablet? Pair from it instead…**
+
+Can't connect? The Devices sheet shows what failed. If the TV was reset or you removed the phone there, tap ✕ to
+forget the TV in AirPhone and add it again.
 
 ## Limits
+- Hosts on Android 15 (and newer Google TV builds) only accept a keyboard they connected to themselves the first
+  time. On a phone/tablet host, tap AirPhone in its Bluetooth settings once; after that AirPhone reconnects by itself.
 - The link drops while the app is in the background or the phone screen is off (Android unregisters
   background HID apps); it reconnects in a few seconds when you reopen the app. The screen stays on while the app is open.
 - Keyboard uses a US layout: Turkish letters are sent as the closest English letter (ş→s, ç→c, ğ→g, ı→i, ö→o, ü→u);
