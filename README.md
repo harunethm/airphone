@@ -9,7 +9,7 @@ Nothing to install on the TV: the phone pairs as a standard Bluetooth keyboard +
 
 ## Features
 - **Air mouse**: tilt/turn the phone to move the TV cursor (gyro, works flat or tilted), speed slider.
-- **Touchpad**: drag to move, tap to click.
+- **Touchpad**: drag to move, tap to click, double tap to double-click; scroll with two fingers, or tap then drag.
 - **Remote**: D-pad + OK, Back, Home, Menu, Power, Volume −/+, Mute, Play/Pause (hold to auto-repeat).
 - **Keyboard**: type into the "Type on TV" field and it's typed live on the TV.
 
@@ -47,8 +47,10 @@ forget the TV in AirPhone and add it again.
 ## Limits
 - Hosts on Android 15 (and newer Google TV builds) only accept a keyboard they connected to themselves the first
   time. On a phone/tablet host, tap AirPhone in its Bluetooth settings once; after that AirPhone reconnects by itself.
-- The link drops while the app is in the background or the phone screen is off (Android unregisters
-  background HID apps); it reconnects in a few seconds when you reopen the app. The screen stays on while the app is open.
+- While a TV is connected, AirPhone stays connected in the background and with the screen off (a "Connected to …"
+  notification with a Disconnect button). Swiping the app away from recent apps disconnects it.
+- Scrolling needs a pairing made with 0.3.0 or newer: TVs paired with an older version remember a mouse without a
+  scroll wheel. Unpair the phone on the TV (Remotes & Accessories) and Forget the TV in AirPhone, then add it again.
 - Keyboard uses a US layout: Turkish letters are sent as the closest English letter (ş→s, ç→c, ğ→g, ı→i, ö→o, ü→u);
   other characters with no US key (emoji, €) are skipped.
 - **Power** sends a sleep/power key; waking the stick from the phone is not guaranteed — use the TV remote/HDMI-CEC.

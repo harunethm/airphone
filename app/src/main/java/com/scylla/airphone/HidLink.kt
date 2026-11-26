@@ -76,6 +76,7 @@ object HidLink {
     private var searchLive = false // our discovery has started (see ACTION_DISCOVERY_STARTED)
     private val mouseLock = Any()
     private lateinit var prefs: SharedPreferences
+    private var appContext: Context? = null
     private val main = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { main.post(it) }
 
@@ -96,8 +97,7 @@ object HidLink {
      * process leaves the foreground (screen off, app switch), so re-register here; the
      * registered callback then reconnects the last TV.
      */
-    // ponytail: no foreground service, so the TV link drops while the app is in the background.
-    // Add a connectedDevice foreground service if an always-on link is wanted.
+    // While a TV is connected, LinkService (foreground service) keeps us registered in the background.
     fun start(ctx: Context) {
         foreground = true
         retriedThisResume = false
@@ -106,6 +106,7 @@ object HidLink {
             return
         }
         val app = ctx.applicationContext
+        appContext = app
         prefs = app.getSharedPreferences("airphone", Context.MODE_PRIVATE)
         val a = app.getSystemService(BluetoothManager::class.java)?.adapter
             ?: return set(Phase.UNSUPPORTED, "This phone has no Bluetooth")
@@ -266,6 +267,8 @@ object HidLink {
     // gyro report from landing between a click's press and release and leaving the button held.
     fun move(dx: Int, dy: Int) = synchronized(mouseLock) { send(Hid.ID_MOUSE, Hid.mouse(0, dx, dy)) }
 
+    fun scroll(wheel: Int, pan: Int) = synchronized(mouseLock) { send(Hid.ID_MOUSE, Hid.mouse(0, 0, 0, wheel, pan)) }
+
     fun click() = synchronized(mouseLock) {
         send(Hid.ID_MOUSE, Hid.mouse(1, 0, 0))
         send(Hid.ID_MOUSE, Hid.mouse(0, 0, 0))
@@ -335,12 +338,17 @@ object HidLink {
         stopConnecting()
         host = null // its DISCONNECTED never came; don't park behind it again
         hostName = null
+        appContext?.let { LinkService.stop(it) }
         connect(next)
     }
 
-    /** Remember a host only once it kept the connection: Android 15+ hosts accept, then drop at once. */
+    /**
+     * Once a host kept the connection (Android 15+ hosts accept, then drop at once): remember it and start the
+     * background-keeping service — not earlier, so refusing hosts don't flash a notification.
+     */
     private val markKnown = Runnable {
         val d = host ?: return@Runnable
+        appContext?.let { LinkService.start(it, label(d)) }
         prefs.edit()
             .putString(KEY_LAST, d.address)
             .putStringSet(KEY_KNOWN, knownHosts() + d.address)
@@ -366,6 +374,7 @@ object HidLink {
         host = null
         hostName = null
         pending = null
+        appContext?.let { LinkService.stop(it) }
     }
 
     private val listener = object : BluetoothProfile.ServiceListener {
@@ -547,6 +556,7 @@ object HidLink {
                     if (device == host) {
                         host = null
                         hostName = null
+                        appContext?.let { LinkService.stop(it) }
                     }
                     val next = pending
                     pending = null

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+- Scroll from the touchpad: drag with two fingers, or tap then drag with one. Content follows your fingers.
+  Double tap is a double click. TVs paired with an older version need one re-pair for scrolling (the app tells you).
+- Stays connected while AirPhone is in the background or the phone screen is off, so the app on the TV (e.g. a
+  browser) no longer restarts when the phone locks. A notification shows the connection and has a Disconnect button.
+- The "Type on TV" field lets go of the keyboard when you tap anywhere else or close the keyboard.
+
 ## 0.2.0
 - New Devices sheet: pair from the phone by the TV's Bluetooth address (pairs with every Android TV, including the
   Mi TV Stick, whose Add accessory screen never lists phones) or by searching nearby (Android TV 12+).

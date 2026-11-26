@@ -41,7 +41,8 @@ class HidTest {
     @Test
     fun reportBytes() {
         assertEquals(listOf<Byte>(0x23, 0x02), Hid.consumer(Hid.CC_HOME).toList())
-        assertEquals(listOf<Byte>(1, 127, -127), Hid.mouse(1, 500, -500).toList())
+        assertEquals(listOf<Byte>(1, 127, -127, 0, 0), Hid.mouse(1, 500, -500).toList())
+        assertEquals(listOf<Byte>(0, 0, 0, 127, -3), Hid.mouse(0, 0, 0, wheel = 300, pan = -3).toList())
     }
 
     @Test
