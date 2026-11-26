@@ -1,0 +1,16 @@
+# Local build output only, never committed - published via GitHub Releases instead.
+android-release/*.apk
+
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Signing material and Android Studio signed-APK output never belong in the repo
+*.jks
+*.keystore
+*.aab
+captures/

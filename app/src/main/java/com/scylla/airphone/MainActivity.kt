@@ -1,0 +1,523 @@
+package com.scylla.airphone
+
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.provider.Settings
+import android.view.HapticFeedbackConstants
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+
+class MainActivity : ComponentActivity(), SensorEventListener {
+    private lateinit var prefs: SharedPreferences
+    private lateinit var sensors: SensorManager
+    private var gyro: Sensor? = null
+    private var gravity: Sensor? = null
+    private lateinit var sensorThread: HandlerThread
+    private val motion = AirMotion()
+    private var resumed = false // lifecycle state isn't RESUMED yet inside onResume
+    private var air by mutableStateOf(false)
+    private var gain by mutableFloatStateOf(AirMotion.DEFAULT_GAIN)
+
+    private val perms = if (Build.VERSION.SDK_INT >= 31) {
+        arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE)
+    } else {
+        emptyArray()
+    }
+    private val askPerms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { startLink() }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        prefs = getSharedPreferences("airphone", MODE_PRIVATE)
+        sensors = getSystemService(SensorManager::class.java)
+        gyro = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        gravity = sensors.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        sensorThread = HandlerThread("air").apply { start() }
+        gain = prefs.getFloat(PREF_GAIN, AirMotion.DEFAULT_GAIN)
+        motion.gain = gain
+        air = gyro != null && prefs.getBoolean(PREF_AIR, true)
+        if (!hasPerms()) requestPerms()
+
+        setContent {
+            AirTheme {
+                RemoteScreen(
+                    air = air,
+                    hasGyro = gyro != null,
+                    onAir = ::toggleAir,
+                    gain = gain,
+                    onGain = { gain = it; motion.gain = it },
+                    onGainDone = { prefs.edit().putFloat(PREF_GAIN, gain).apply() },
+                    onFix = ::fix,
+                    onPair = ::makeDiscoverable,
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        startLink()
+        updateSensors()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        resumed = false
+        HidLink.pause()
+        updateSensors()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        sensorThread.quitSafely()
+    }
+
+    private fun hasPerms() = perms.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+
+    private fun requestPerms() {
+        prefs.edit().putBoolean(PREF_ASKED, true).apply()
+        askPerms.launch(perms)
+    }
+
+    private fun startLink() = if (hasPerms()) HidLink.start(applicationContext) else HidLink.needPermission()
+
+    private fun fix() {
+        when (HidLink.phase) {
+            HidLink.Phase.NEED_PERMISSION -> {
+                val denied = perms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                val blocked = prefs.getBoolean(PREF_ASKED, false) && denied.none { shouldShowRequestPermissionRationale(it) }
+                if (blocked) {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+                } else {
+                    requestPerms()
+                }
+            }
+            HidLink.Phase.BT_OFF -> startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            else -> {}
+        }
+    }
+
+    private fun makeDiscoverable() {
+        startActivity(
+            Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120),
+        )
+    }
+
+    private fun toggleAir(on: Boolean) {
+        air = on
+        prefs.edit().putBoolean(PREF_AIR, on).apply()
+        updateSensors()
+    }
+
+    private fun updateSensors() {
+        sensors.unregisterListener(this)
+        val g = gyro ?: return
+        if (!air || !resumed) return
+        motion.reset()
+        val handler = Handler(sensorThread.looper)
+        gravity?.let { sensors.registerListener(this, it, SAMPLE_US, handler) }
+        sensors.registerListener(this, g, SAMPLE_US, handler)
+    }
+
+    override fun onSensorChanged(e: SensorEvent) {
+        if (e.sensor.type != Sensor.TYPE_GYROSCOPE) return motion.gravity(e.values)
+        val (dx, dy) = motion.gyro(e.values, e.timestamp)
+        if (dx != 0 || dy != 0) HidLink.move(dx, dy)
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
+
+    private companion object {
+        const val SAMPLE_US = 10_000 // 100 Hz
+        const val PREF_GAIN = "gain"
+        const val PREF_AIR = "air"
+        const val PREF_ASKED = "asked_perms"
+    }
+}
+
+private const val TOUCH_GAIN = 1.2f // cursor counts per phone pixel
+
+@Composable
+private fun AirTheme(content: @Composable () -> Unit) {
+    val scheme = if (Build.VERSION.SDK_INT >= 31) dynamicDarkColorScheme(LocalContext.current) else darkColorScheme()
+    MaterialTheme(colorScheme = scheme) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background, content = content)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RemoteScreen(
+    air: Boolean,
+    hasGyro: Boolean,
+    onAir: (Boolean) -> Unit,
+    gain: Float,
+    onGain: (Float) -> Unit,
+    onGainDone: () -> Unit,
+    onFix: () -> Unit,
+    onPair: () -> Unit,
+) {
+    var pairing by remember { mutableStateOf(false) }
+    // While the phone keyboard is up there's no room for the remote; keep header, touchpad and text field.
+    val typing = WindowInsets.isImeVisible
+    BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        val compact = maxHeight < 680.dp // small phones: shrink keys so the touchpad keeps usable height
+        val keyH = if (compact) 44.dp else 52.dp
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)) {
+            Header(onFix = onFix, onPair = { onPair(); pairing = true })
+            if (!typing) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val m = Modifier.weight(1f).height(keyH)
+                    ConsumerKey("Power", Hid.CC_POWER, m, text = "POWER")
+                    ConsumerKey("Back", Hid.CC_BACK, m, icon = Icons.AutoMirrored.Filled.ArrowBack)
+                    ConsumerKey("Home", Hid.CC_HOME, m, icon = Icons.Filled.Home)
+                    ConsumerKey("Menu", Hid.CC_MENU, m, icon = Icons.Filled.Menu)
+                }
+                DPad(if (compact) 50.dp else 60.dp, Modifier.align(Alignment.CenterHorizontally))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val m = Modifier.weight(1f).height(keyH)
+                    ConsumerKey("Volume down", Hid.CC_VOL_DOWN, m, text = "VOL −")
+                    ConsumerKey("Mute", Hid.CC_MUTE, m, text = "MUTE")
+                    ConsumerKey("Volume up", Hid.CC_VOL_UP, m, text = "VOL +")
+                    ConsumerKey("Play or pause", Hid.CC_PLAY_PAUSE, m, icon = Icons.Filled.PlayArrow)
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Air mouse", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = air,
+                        onCheckedChange = onAir,
+                        enabled = hasGyro,
+                        modifier = Modifier.semantics { contentDescription = "Air mouse" },
+                    )
+                    if (hasGyro) {
+                        Text(
+                            "Speed",
+                            Modifier.padding(start = 16.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Slider(
+                            value = gain,
+                            onValueChange = onGain,
+                            onValueChangeFinished = onGainDone,
+                            valueRange = 600f..4000f,
+                            enabled = air,
+                            modifier = Modifier.weight(1f).padding(start = 8.dp).semantics { contentDescription = "Air mouse speed" },
+                        )
+                    } else {
+                        Text(
+                            "No gyroscope on this phone",
+                            Modifier.padding(start = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            TouchPad(Modifier.fillMaxWidth().weight(1f))
+            TypeRow()
+        }
+    }
+    if (pairing) PairDialog { pairing = false }
+}
+
+@Composable
+private fun Header(onFix: () -> Unit, onPair: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                HidLink.hostName ?: "Not connected",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                HidLink.status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        when (HidLink.phase) {
+            HidLink.Phase.NEED_PERMISSION -> Button(onClick = onFix) { Text("Allow") }
+            HidLink.Phase.BT_OFF -> Button(onClick = onFix) { Text("Turn on") }
+            HidLink.Phase.READY, HidLink.Phase.CONNECTED -> DeviceMenu(onPair)
+            HidLink.Phase.STARTING, HidLink.Phase.UNSUPPORTED -> {}
+        }
+    }
+}
+
+@Composable
+private fun DeviceMenu(onPair: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        FilledTonalButton(onClick = { open = true }) {
+            Text(if (HidLink.phase == HidLink.Phase.CONNECTED) "Devices" else "Connect")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            val devices = remember(open) { if (open) HidLink.bonded() else emptyList() }
+            for ((name, device) in devices) {
+                DropdownMenuItem(
+                    text = { Text(name) },
+                    leadingIcon = { if (HidLink.isHost(device)) Icon(Icons.Filled.Check, contentDescription = "Connected") },
+                    onClick = { open = false; HidLink.connect(device) },
+                )
+            }
+            if (devices.isEmpty()) DropdownMenuItem(text = { Text("No paired devices yet") }, onClick = {}, enabled = false)
+            HorizontalDivider()
+            DropdownMenuItem(text = { Text("Pair new TV…") }, onClick = { open = false; onPair() })
+            if (HidLink.phase == HidLink.Phase.CONNECTED) {
+                DropdownMenuItem(text = { Text("Disconnect") }, onClick = { open = false; HidLink.disconnect() })
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairDialog(onDismiss: () -> Unit) = AlertDialog(
+    onDismissRequest = onDismiss,
+    confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    title = { Text("Pair with your TV") },
+    text = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "1. Allow the visibility prompt — your phone shows up as “${HidLink.phoneName}” for 2 minutes.\n" +
+                    "2. On the TV: Settings → Remotes & Accessories → Add accessory.\n" +
+                    "3. Pick your phone, then confirm the pairing code on both screens.\n\n" +
+                    "It connects by itself after pairing. Paired these two before? Unpair on both sides first.",
+            )
+            Text(HidLink.status, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        }
+    },
+)
+
+@Composable
+private fun DPad(keySize: Dp, modifier: Modifier) {
+    val k = Modifier.size(keySize)
+    val arrow = Icons.Filled.KeyboardArrowUp
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ConsumerKey("Up", Hid.CC_UP, k, icon = arrow)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ConsumerKey("Left", Hid.CC_LEFT, k, icon = arrow, rotation = 270f)
+            ConsumerKey("OK", Hid.CC_OK, k)
+            ConsumerKey("Right", Hid.CC_RIGHT, k, icon = arrow, rotation = 90f)
+        }
+        ConsumerKey("Down", Hid.CC_DOWN, k, icon = arrow, rotation = 180f)
+    }
+}
+
+@Composable
+private fun ConsumerKey(
+    label: String,
+    usage: Int,
+    modifier: Modifier,
+    icon: ImageVector? = null,
+    rotation: Float = 0f,
+    text: String? = null,
+) = Key(label, modifier, icon, rotation, text, onDown = { HidLink.consumer(usage) }, onUp = { HidLink.consumer(0) })
+
+/** Press sends key-down, release sends key-up, so holding a key auto-repeats on the TV like a real remote. */
+@Composable
+private fun Key(
+    label: String,
+    modifier: Modifier,
+    icon: ImageVector? = null,
+    rotation: Float = 0f,
+    text: String? = null,
+    onDown: () -> Unit,
+    onUp: () -> Unit,
+) {
+    var down by remember { mutableStateOf(false) }
+    val view = LocalView.current
+    Surface(
+        modifier = modifier
+            .clearAndSetSemantics {
+                role = Role.Button
+                contentDescription = label
+                onClick { onDown(); onUp(); true }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = {
+                    down = true
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    onDown()
+                    // finally: a press cancelled mid-hold (key leaves the screen when the keyboard opens)
+                    // must still send key-up, or the TV keeps auto-repeating it.
+                    try {
+                        tryAwaitRelease()
+                    } finally {
+                        onUp()
+                        down = false
+                    }
+                })
+            },
+        shape = RoundedCornerShape(16.dp),
+        color = if (down) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            if (icon != null) Icon(icon, contentDescription = null, modifier = Modifier.rotate(rotation))
+            else Text(text ?: label, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+@Composable
+private fun TouchPad(modifier: Modifier) {
+    val acc = remember { FloatArray(2) }
+    Box(
+        modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .semantics { contentDescription = "Touchpad"; onClick { HidLink.click(); true } }
+            .pointerInput(Unit) { detectTapGestures(onTap = { HidLink.click() }) }
+            .pointerInput(Unit) {
+                detectDragGestures { change, drag ->
+                    change.consume()
+                    acc[0] += drag.x * TOUCH_GAIN
+                    acc[1] += drag.y * TOUCH_GAIN
+                    val dx = acc[0].toInt()
+                    val dy = acc[1].toInt()
+                    acc[0] -= dx
+                    acc[1] -= dy
+                    if (dx != 0 || dy != 0) HidLink.move(dx, dy)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "Touchpad\ndrag to move · tap to click",
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun TypeRow() {
+    var text by remember { mutableStateOf("") }
+    // The field mirrors what this TV connection received; start fresh when the host changes so
+    // text typed while disconnected never turns into backspaces on the TV.
+    LaunchedEffect(HidLink.hostName) { text = "" }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { new ->
+                val (backspaces, typed) = Hid.textEdits(text, new)
+                HidLink.type(backspaces, typed)
+                text = new
+            },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            label = { Text("Type on TV") },
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { HidLink.type(0, "\n"); text = "" }),
+            trailingIcon = {
+                if (text.isNotEmpty()) {
+                    IconButton(onClick = { text = "" }) { Icon(Icons.Filled.Clear, contentDescription = "Clear field (TV text stays)") }
+                }
+            },
+        )
+        Key(
+            "Backspace",
+            Modifier.size(56.dp),
+            text = "⌫",
+            onDown = { HidLink.keyDown(0, Hid.KEY_BACKSPACE) },
+            onUp = { HidLink.keyUp() },
+        )
+    }
+}

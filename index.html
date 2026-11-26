@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirPhone — your phone as an air mouse and remote for Android TV</title>
+<meta name="description" content="Turn your Android phone into an air mouse, remote and keyboard for a Xiaomi Mi TV Stick or any Android TV. Pairs over Bluetooth like a normal keyboard + mouse. Nothing to install on the TV.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='24' fill='%231B2A41'/%3E%3Cpath d='M38 32v42l10.5-10.5 7 15 7-3-7-15H70Z' fill='%23fff'/%3E%3Cpath d='M62 36a12 12 0 0 1 12 12M62 26a22 22 0 0 1 22 22' stroke='%237FD1FF' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0E1726; --bg-2:#152238; --bg-3:#1B2A41;
+    --ink:#EAF0F7; --ink-muted:#A0AEC3; --ink-faint:#6F7F97;
+    --accent:#7FD1FF; --accent-ink:#04202E;
+    --accent-2:#C3B5FF;
+    --edge:rgba(255,255,255,0.09);
+    --radius:16px;
+    --font-display:'Sora',system-ui,sans-serif;
+    --font-body:'IBM Plex Sans',system-ui,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font-body); line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;}
+  img,svg{display:block; max-width:100%;}
+  .wrap{max-width:1100px; margin:0 auto; padding-inline:24px;}
+  @media (max-width:480px){.wrap{padding-inline:16px;}}
+  h1,h2,h3{font-family:var(--font-display); line-height:1.15; margin:0; text-wrap:balance;}
+  .eyebrow{
+    font-family:var(--font-mono); font-size:0.78rem; letter-spacing:0.08em; text-transform:uppercase;
+    color:var(--accent); display:inline-flex; align-items:center; gap:8px;
+  }
+  .eyebrow::before{content:""; width:8px; height:8px; border-radius:50%; background:var(--accent);}
+  p{color:var(--ink-muted); margin:0;}
+  .lede{font-size:1.15rem; max-width:52ch;}
+  .inline-link{color:var(--accent); text-decoration:underline;}
+
+  header.site{
+    position:sticky; top:0; z-index:10; backdrop-filter:blur(10px);
+    background:color-mix(in srgb, var(--bg) 82%, transparent);
+    border-bottom:1px solid var(--edge);
+  }
+  .nav{display:flex; align-items:center; justify-content:space-between; padding-block:14px;}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; font-size:1.05rem;}
+  .brand svg{width:28px; height:28px;}
+  .nav-links{display:flex; align-items:center; gap:24px; font-size:0.92rem; color:var(--ink-muted);}
+  .nav-links a, .footer-links a{text-decoration:none;}
+  .nav-links a:hover{color:var(--ink);}
+  @media (max-width:640px){.nav-links a:not(.btn){display:none;}}
+  .btn{
+    display:inline-flex; align-items:center; gap:8px; font-family:var(--font-body); font-weight:600;
+    font-size:0.94rem; padding:11px 20px; border-radius:999px; text-decoration:none; border:1px solid transparent;
+    min-height:44px; transition:transform .15s ease;
+  }
+  .btn:hover{transform:translateY(-1px);}
+  .btn svg{width:18px; height:18px; flex-shrink:0;}
+  .btn-primary{background:var(--accent); color:var(--accent-ink);}
+  .btn-ghost{border-color:var(--edge); color:var(--ink);}
+  .btn-ghost:hover{border-color:var(--ink-faint);}
+  .btn-sm{padding:8px 14px; font-size:0.85rem; min-height:36px;}
+
+  .hero{
+    padding-block:80px 56px; position:relative; overflow:hidden;
+    background:
+      radial-gradient(60% 50% at 82% 8%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+      radial-gradient(50% 45% at 10% 30%, color-mix(in srgb, var(--accent-2) 12%, transparent), transparent 60%);
+  }
+  .hero-grid{display:grid; grid-template-columns:1.15fr 0.85fr; gap:48px; align-items:center;}
+  @media (max-width:860px){.hero-grid{grid-template-columns:1fr;} .hero{padding-block:48px 40px;}}
+  .hero h1{font-size:clamp(2.1rem,4.6vw,3.4rem); font-weight:800; margin-block:18px 16px;}
+  .hero h1 .hl{color:var(--accent);}
+  .cta-row{display:flex; flex-wrap:wrap; gap:12px; margin-top:28px;}
+  .hero-note{margin-top:14px; font-family:var(--font-mono); font-size:0.78rem; color:var(--ink-faint);}
+
+  .phone-shot{max-width:280px; margin-inline:auto;}
+  .phone-shot img{
+    width:100%; height:auto; border-radius:28px; border:5px solid var(--bg-3);
+    box-shadow:0 28px 56px -18px rgba(0,0,0,0.6);
+  }
+  .phone-shot figcaption{
+    margin-top:14px; font-family:var(--font-mono); font-size:0.72rem; color:var(--ink-faint); text-align:center;
+  }
+  figure{margin:0;}
+
+  section{padding-block:64px;}
+  @media (max-width:640px){section{padding-block:48px;}}
+  .section-head{max-width:640px; margin-bottom:36px;}
+  .section-head h2{font-size:clamp(1.6rem,3vw,2.1rem); margin-top:12px;}
+
+  .diagram{
+    background:var(--bg-2); border:1px solid var(--edge); border-radius:var(--radius);
+    padding:28px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:24px;
+  }
+  .diagram .node{display:flex; flex-direction:column; align-items:center; gap:10px; flex:1;}
+  .diagram .icon-box{
+    width:60px; height:60px; border-radius:18px; background:var(--bg-3); display:flex; align-items:center; justify-content:center;
+    border:1px solid var(--edge);
+  }
+  .diagram .node span{font-family:var(--font-mono); font-size:0.72rem; color:var(--ink-muted); text-align:center;}
+  .diagram .link{flex:1.2; display:flex; flex-direction:column; align-items:center; gap:6px; color:var(--accent);}
+  .diagram .link small{font-family:var(--font-mono); font-size:0.68rem; color:var(--ink-faint); text-align:center;}
+
+  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:20px;}
+  @media (max-width:780px){.steps{grid-template-columns:1fr;}}
+  .step{background:var(--bg-2); border:1px solid var(--edge); border-radius:var(--radius); padding:24px;}
+  .step .num{font-family:var(--font-mono); color:var(--accent); font-size:0.85rem;}
+  .step h3{font-size:1.08rem; margin-block:10px 8px;}
+  .step p{font-size:0.94rem;}
+  .step b{color:var(--ink); font-weight:600;}
+
+  .features{display:grid; grid-template-columns:repeat(3,1fr); gap:20px;}
+  @media (max-width:900px){.features{grid-template-columns:repeat(2,1fr);}}
+  @media (max-width:600px){.features{grid-template-columns:1fr;}}
+  .feature{padding:24px; border-radius:var(--radius); border:1px solid var(--edge);}
+  .feature .icon{
+    width:42px; height:42px; border-radius:12px; background:color-mix(in srgb, var(--accent) 16%, transparent);
+    display:flex; align-items:center; justify-content:center; color:var(--accent); margin-bottom:14px;
+  }
+  .feature .icon svg{width:22px; height:22px;}
+  .feature h3{font-size:1.02rem; margin-bottom:6px;}
+  .feature p{font-size:0.9rem;}
+
+  .limits{background:var(--bg-2); border-top:1px solid var(--edge); border-bottom:1px solid var(--edge);}
+  .limits ul{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:14px; max-width:760px;}
+  .limits li{display:flex; gap:12px; font-size:0.95rem; color:var(--ink-muted);}
+  .limits li svg{flex-shrink:0; width:20px; height:20px; color:var(--accent-2); margin-top:2px;}
+  .limits li b{color:var(--ink);}
+
+  .download{
+    text-align:center; background:
+      radial-gradient(60% 80% at 50% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 70%);
+  }
+  .download h2{font-size:clamp(1.8rem,3.4vw,2.4rem); margin-top:12px;}
+  .download .cta-row{justify-content:center;}
+  .download p{max-width:48ch; margin:12px auto 0;}
+  .version-chip{font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-faint); margin-top:16px;}
+
+  footer{border-top:1px solid var(--edge); padding-block:32px;}
+  .footer-row{display:flex; flex-wrap:wrap; justify-content:space-between; gap:16px; align-items:center;}
+  .footer-links{display:flex; flex-wrap:wrap; gap:20px; font-size:0.88rem; color:var(--ink-muted);}
+  .footer-links a:hover{color:var(--ink);}
+  footer .credit{font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-faint);}
+</style>
+</head>
+<body>
+
+<header class="site">
+  <nav class="wrap nav">
+    <div class="brand">
+      <svg viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2A41"/><path d="M38 32v42l10.5-10.5 7 15 7-3-7-15H70Z" fill="#fff"/><path d="M62 36a12 12 0 0 1 12 12M62 26a22 22 0 0 1 22 22" stroke="#7FD1FF" stroke-width="5" fill="none" stroke-linecap="round"/></svg>
+      AirPhone
+    </div>
+    <div class="nav-links">
+      <a href="#how-it-works">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#download">Download</a>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/harunethm/airphone" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Free · Source on GitHub · Nothing to install on the TV</span>
+      <h1>Point your phone.<br><span class="hl">Move the cursor.</span></h1>
+      <p class="lede">AirPhone turns your Android phone into an air mouse, remote and keyboard for a Xiaomi Mi TV Stick or any Android TV. It pairs over Bluetooth like an ordinary keyboard and mouse — no receiver app, no Wi-Fi setup, no account.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/harunethm/airphone/releases/download/android-latest/AirPhone.apk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/></svg>
+          Download APK
+        </a>
+        <a class="btn btn-ghost" href="#how-it-works">How it works</a>
+      </div>
+      <div class="hero-note">v0.1.0 · phone: Android 9+ · TV: Mi TV Stick / Android TV</div>
+    </div>
+    <figure class="phone-shot">
+      <img src="assets/screenshots/remote.png" width="629" height="1400" alt="AirPhone on a phone: device status, power/back/home/menu keys, D-pad, volume keys, air mouse switch with speed slider, touchpad and a text field for typing on the TV">
+      <figcaption>Remote, air mouse, touchpad and keyboard on one screen</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="how-it-works">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">How it works</span>
+      <h2>Pair once, like a Bluetooth keyboard.</h2>
+    </div>
+    <div class="diagram" aria-label="Phone connects to the TV over Bluetooth as a keyboard and mouse">
+      <div class="node">
+        <div class="icon-box"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#EAF0F7" stroke-width="1.6" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg></div>
+        <span>AirPhone</span>
+      </div>
+      <div class="link">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>
+        <small>Bluetooth · keyboard + mouse</small>
+      </div>
+      <div class="node">
+        <div class="icon-box"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#EAF0F7" stroke-width="1.6" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        <span>Mi TV Stick</span>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="num">01</div>
+        <h3>Make the phone visible</h3>
+        <p>Open AirPhone, allow Bluetooth, then tap <b>Connect → Pair new TV…</b> and allow visibility.</p>
+      </div>
+      <div class="step">
+        <div class="num">02</div>
+        <h3>Add it on the TV</h3>
+        <p>On the TV: <b>Settings → Remotes &amp; Accessories → Add accessory</b>, pick your phone and confirm the code on both screens.</p>
+      </div>
+      <div class="step">
+        <div class="num">03</div>
+        <h3>Point and click</h3>
+        <p>It connects by itself. From then on, opening the app reconnects to the last TV.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" style="padding-top:0;">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Features</span>
+      <h2>Everything the TV remote does — plus a cursor.</h2>
+    </div>
+    <div class="features">
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3v14l4-4 3 7 3-1.3-3-6.7h6Z"/></svg></div>
+        <h3>Air mouse</h3>
+        <p>Turn and tilt the phone to move the cursor — works whether you hold it flat or upright. Speed slider included.</p>
+      </div>
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="12" cy="12" r="2"/></svg></div>
+        <h3>Touchpad</h3>
+        <p>Drag to move, tap to click — for when you'd rather not wave the phone around.</p>
+      </div>
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="2"/></svg></div>
+        <h3>Full remote</h3>
+        <p>D-pad and OK, Back, Home, Menu, Power, volume, mute and play/pause. Hold a key to repeat.</p>
+      </div>
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></div>
+        <h3>Type with your phone keyboard</h3>
+        <p>Search fields fill in as you type on your phone. Turkish letters go out as their closest English letter (ş → s).</p>
+      </div>
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        <h3>No TV app</h3>
+        <p>The TV sees a standard Bluetooth keyboard and mouse. Nothing to sideload on the stick.</p>
+      </div>
+      <div class="feature">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6Z"/></svg></div>
+        <h3>Private by design</h3>
+        <p>No internet permission, no account, no analytics. Just Bluetooth between your phone and your TV.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="limits">
+  <div class="wrap">
+    <div class="section-head" style="margin-bottom:24px;">
+      <span class="eyebrow">Good to know</span>
+      <h2>Honest limits</h2>
+    </div>
+    <ul>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><span><b>Keep the app open.</b> Android disconnects keyboard/mouse apps in the background, so the TV link drops when you switch apps or lock the phone. It reconnects in a few seconds when you come back; the screen stays on while the app is open.</span></li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><span><b>Some phones can't do it.</b> A few manufacturers remove Android's Bluetooth keyboard/mouse mode. AirPhone tells you on launch if yours is one of them.</span></li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><span><b>Power puts the stick to sleep</b>; waking it from the phone isn't guaranteed — use the TV remote or HDMI-CEC for that.</span></li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><span><b>Paired these two before?</b> Unpair the phone on the TV and the TV on the phone first, so the TV picks up the keyboard + mouse profile.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section class="download" id="download">
+  <div class="wrap">
+    <span class="eyebrow" style="justify-content:center;">Get started</span>
+    <h2>Free for Android phones.</h2>
+    <p>Not on the Play Store — open this page on your phone, download the APK and allow "install unknown apps" for your browser once.</p>
+    <div class="cta-row" style="margin-top:24px;">
+      <a class="btn btn-primary" href="https://github.com/harunethm/airphone/releases/download/android-latest/AirPhone.apk">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 9v7a1 1 0 0 0 1 1h1v3a1 1 0 0 0 2 0v-3h4v3a1 1 0 0 0 2 0v-3h1a1 1 0 0 0 1-1V9H6zm12.5-4.3-1.4-1.4-1.8 1.8A6.98 6.98 0 0 0 12 4.5c-1.2 0-2.3.3-3.3.9L6.9 3.6 5.5 5l1.6 1.6C6.1 7.5 5.5 8.7 5.3 10h13.4c-.2-1.3-.8-2.5-1.7-3.4l1.5-1.5zM10 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm4 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>
+        Download APK (Android)
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/harunethm/airphone/releases" target="_blank" rel="noopener">All releases</a>
+    </div>
+    <div class="version-chip">v0.1.0 · Android 9+ · nothing to install on the TV</div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <div class="brand" style="font-size:0.95rem;">
+      <svg viewBox="0 0 108 108" width="22" height="22" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2A41"/><path d="M38 32v42l10.5-10.5 7 15 7-3-7-15H70Z" fill="#fff"/><path d="M62 36a12 12 0 0 1 12 12M62 26a22 22 0 0 1 22 22" stroke="#7FD1FF" stroke-width="5" fill="none" stroke-linecap="round"/></svg>
+      AirPhone
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/harunethm/airphone" target="_blank" rel="noopener">Source</a>
+      <a href="https://github.com/harunethm/airphone/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/harunethm/airphone/issues" target="_blank" rel="noopener">Report an issue</a>
+    </div>
+    <div class="credit">Personal project · not affiliated with Xiaomi or Google</div>
+  </div>
+</footer>
+
+</body>
+</html>

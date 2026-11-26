@@ -1,0 +1,25 @@
+name: CI
+
+# Unit tests + debug build on every push and PR. Release APKs are built and signed locally
+# (the signing key never leaves the maintainer's machine) and published with release.sh.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Test and build
+        run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleDebug
